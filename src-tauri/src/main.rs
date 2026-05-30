@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,6 +9,10 @@ use tauri::State;
 
 // ─────────────────────────────────────────────────────────── State ──────────
 struct DbState(Mutex<Connection>);
+
+const FIRST_SCHOOL_YEAR: i64 = 2026;
+const MAX_LOAN_DAYS: i64 = 30;
+const MAX_FUTURE_SCHOOL_YEARS: i64 = 5;
 
 // ─────────────────────────────────────────────────────── Data types ──────────
 
@@ -281,6 +285,35 @@ fn validate_grade_class(grade: i64, class: &str) -> bool {
     if grade < 1 || grade > 9 { return false; }
     let valid = if grade == 3 { vec!["A","B","C"] } else { vec!["A","B"] };
     valid.contains(&class)
+}
+
+fn validate_school_year(ano_letivo: i64) -> Result<(), String> {
+    let max_year = Local::now().year() as i64 + MAX_FUTURE_SCHOOL_YEARS;
+    if ano_letivo < FIRST_SCHOOL_YEAR || ano_letivo > max_year {
+        return Err(format!(
+            "Ano letivo inválido. Use anos de {} até {}.",
+            FIRST_SCHOOL_YEAR, max_year
+        ));
+    }
+    Ok(())
+}
+
+fn validate_due_date(due_date: &str) -> Result<(), String> {
+    let due = NaiveDate::parse_from_str(due_date, "%Y-%m-%d")
+        .map_err(|_| "Data de devolução inválida.".to_string())?;
+    let today = Local::now().date_naive();
+    let max_due = today + Duration::days(MAX_LOAN_DAYS);
+
+    if due < today {
+        return Err("A data de devolução não pode ser anterior a hoje.".to_string());
+    }
+    if due > max_due {
+        return Err(format!(
+            "A data de devolução não pode passar de {} dias.",
+            MAX_LOAN_DAYS
+        ));
+    }
+    Ok(())
 }
 
 fn days_between(from: &str, to: &str) -> i64 {
@@ -618,6 +651,8 @@ fn create_loan(
     due_date: String,
 ) -> Result<LoanDetail, String> {
     if student_name.trim().is_empty() { return Err("Nome do aluno é obrigatório.".to_string()); }
+    validate_school_year(ano_letivo)?;
+    validate_due_date(&due_date)?;
     if !validate_grade_class(student_grade, &student_class) {
         return Err(format!("Turma '{}' inválida para o {}° Ano.", student_class, student_grade));
     }
@@ -678,6 +713,7 @@ fn return_book(state: State<DbState>, loan_id: i64) -> Result<(), String> {
 
 #[tauri::command]
 fn renew_loan(state: State<DbState>, loan_id: i64, new_due_date: String) -> Result<LoanDetail, String> {
+    validate_due_date(&new_due_date)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     conn.execute("UPDATE loans SET due_date=?1, renewed=renewed+1, status='active' WHERE id=?2", params![new_due_date, loan_id]).map_err(|e| e.to_string())?;
     fetch_loan_detail(&conn, loan_id).map_err(|e| e.to_string())

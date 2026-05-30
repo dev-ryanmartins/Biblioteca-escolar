@@ -159,7 +159,12 @@ export function currentYear(): number {
   return new Date().getFullYear();
 }
 
-export function yearRange(span = 5): number[] {
-  const y = currentYear();
-  return Array.from({ length: span }, (_, i) => y - i + 1);
+export const FIRST_SCHOOL_YEAR = 2026;
+
+export function yearRange(futureYears = 1): number[] {
+  const lastYear = Math.max(FIRST_SCHOOL_YEAR, currentYear() + futureYears);
+  return Array.from(
+    { length: lastYear - FIRST_SCHOOL_YEAR + 1 },
+    (_, i) => FIRST_SCHOOL_YEAR + i,
+  );
 }

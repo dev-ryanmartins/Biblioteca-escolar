@@ -16,6 +16,7 @@ import type { Book, LoanDetail } from "../types";
 import { MONTHS, VALID_CLASSES_BY_GRADE, WEEKS, currentYear, yearRange } from "../types";
 
 const GRADES = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const MAX_LOAN_DAYS = 30;
 
 function addDays(dateStr: string, days: number): string {
   const d = new Date(dateStr + "T00:00:00");
@@ -25,6 +26,17 @@ function addDays(dateStr: string, days: number): string {
 
 function today(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+function maxDueDate(): string {
+  return addDays(today(), MAX_LOAN_DAYS);
+}
+
+function validateDueDate(dateStr: string): string | null {
+  if (!dateStr) return "Escolha a data de devolução.";
+  if (dateStr < today()) return "A data de devolução não pode ser anterior a hoje.";
+  if (dateStr > maxDueDate()) return `A data de devolução não pode passar de ${MAX_LOAN_DAYS} dias.`;
+  return null;
 }
 
 function StatusBadge({ status, renewed }: { status: string; renewed: number }) {
@@ -98,6 +110,8 @@ export default function Loans() {
     setNError("");
     if (!nName.trim()) { setNError("Nome do aluno é obrigatório."); return; }
     if (nBookId === "") { setNError("Selecione um livro."); return; }
+    const dateError = validateDueDate(nDueDate);
+    if (dateError) { setNError(dateError); return; }
     setNLoading(true);
     try {
       await invoke("create_loan", {
@@ -128,7 +142,8 @@ export default function Loans() {
   async function handleRenew(e: React.FormEvent) {
     e.preventDefault();
     setRenewError("");
-    if (!renewDate) { setRenewError("Escolha a nova data."); return; }
+    const dateError = validateDueDate(renewDate);
+    if (dateError) { setRenewError(dateError); return; }
     setRenewLoading(true);
     try {
       await invoke("renew_loan", { loanId: renewLoan!.id, newDueDate: renewDate });
@@ -359,7 +374,8 @@ export default function Loans() {
           <div className="space-y-3">
             <div>
               <label className="label">Data de Devolução *</label>
-              <input className="input" type="date" min={today()} value={nDueDate} onChange={(e) => setNDueDate(e.target.value)} />
+              <input className="input" type="date" min={today()} max={maxDueDate()} value={nDueDate} onChange={(e) => setNDueDate(e.target.value)} />
+              <p className="text-xs text-slate-500 mt-1">Limite máximo: {MAX_LOAN_DAYS} dias.</p>
             </div>
             <div className="flex gap-2">
               <button
@@ -409,7 +425,8 @@ export default function Loans() {
             </div>
             <div>
               <label className="label">Nova Data de Devolução</label>
-              <input className="input" type="date" min={today()} value={renewDate} onChange={(e) => setRenewDate(e.target.value)} />
+              <input className="input" type="date" min={today()} max={maxDueDate()} value={renewDate} onChange={(e) => setRenewDate(e.target.value)} />
+              <p className="text-xs text-slate-500 mt-1">Limite máximo: {MAX_LOAN_DAYS} dias.</p>
             </div>
             <div className="flex gap-2">
               <button type="button" onClick={() => setRenewDate(addDays(renewLoan.due_date, 7))} className="btn-secondary text-xs">+7 dias</button>

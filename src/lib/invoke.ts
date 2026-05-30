@@ -2,7 +2,7 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/tauri";
 import * as mock from "./mock";
 
-function isTauriAvailable() {
+export function isTauriAvailable() {
     return typeof window !== "undefined" && "__TAURI_IPC__" in window;
 }
 
@@ -14,11 +14,7 @@ export async function invoke<T = unknown>(
         return mockInvoke<T>(command, args);
     }
 
-    try {
-        return await tauriInvoke<T>(command, args);
-    } catch {
-        return mockInvoke<T>(command, args);
-    }
+    return await tauriInvoke<T>(command, args);
 }
 
 async function mockInvoke<T = unknown>(

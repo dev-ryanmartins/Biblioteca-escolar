@@ -1,4 +1,7 @@
 import { invoke } from "../lib/invoke";
+import { isTauriAvailable } from "../lib/invoke";
+import { save } from "@tauri-apps/api/dialog";
+import { writeTextFile } from "@tauri-apps/api/fs";
 import {
   ArcElement,
   BarElement,
@@ -49,11 +52,24 @@ export default function Reports() {
     setCsvLoading(true);
     try {
       const csv = await invoke<string>("export_report_csv", { anoLetivo, month, week });
+      const filename = `relatorio_${(report?.period_label ?? `ano_${anoLetivo}`).replace(/[^a-zA-Z0-9]/g, "_")}.csv`;
+
+      if (isTauriAvailable()) {
+        const filePath = await save({
+          defaultPath: filename,
+          filters: [{ name: "Planilha CSV", extensions: ["csv"] }],
+          title: "Salvar relatório",
+        });
+        if (!filePath) return;
+        await writeTextFile(filePath, csv);
+        return;
+      }
+
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `relatorio_${report?.period_label.replace(/[^a-zA-Z0-9]/g, "_")}.csv`;
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) { alert(String(err)); }
