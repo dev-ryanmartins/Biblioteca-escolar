@@ -62,6 +62,7 @@ export default function Reports() {
         });
         if (!filePath) return;
         await writeTextFile(filePath, csv);
+        alert("Planilha salva com sucesso.");
         return;
       }
 

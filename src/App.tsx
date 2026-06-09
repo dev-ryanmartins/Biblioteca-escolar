@@ -3,11 +3,13 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import Sidebar from "./components/Sidebar";
 import { invoke } from "./lib/invoke";
 import Books from "./pages/Books";
+import Comics from "./pages/Comics";
 import Dashboard from "./pages/Dashboard";
 import Fines from "./pages/Fines";
 import Loans from "./pages/Loans";
 import Login from "./pages/Login";
 import Reports from "./pages/Reports";
+import Settings from "./pages/Settings";
 import Students from "./pages/Students";
 import Users from "./pages/Users";
 import type { User } from "./types";
@@ -64,10 +66,12 @@ export default function App() {
                     <Route path="/" element={<Dashboard />} />
                     <Route path="/students" element={<Students />} />
                     <Route path="/books" element={<Books />} />
+                    <Route path="/comics" element={<Comics />} />
                     <Route path="/loans" element={<Loans />} />
                     <Route path="/fines" element={<Fines />} />
                     <Route path="/reports" element={<Reports />} />
-                    <Route path="/users" element={<Users />} />
+                    <Route path="/users" element={user?.is_admin ? <Users /> : <Navigate to="/" replace />} />
+                    <Route path="/settings" element={user?.is_admin ? <Settings /> : <Navigate to="/" replace />} />
                   </Routes>
                 </AppLayout>
               </RequireAuth>

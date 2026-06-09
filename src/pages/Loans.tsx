@@ -12,11 +12,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import Modal from "../components/Modal";
-import type { Book, LoanDetail } from "../types";
+import type { Book, LoanDetail, SystemSettings } from "../types";
 import { MONTHS, VALID_CLASSES_BY_GRADE, WEEKS, currentYear, yearRange } from "../types";
 
 const GRADES = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-const MAX_LOAN_DAYS = 30;
+const DEFAULT_MAX_LOAN_DAYS = 30;
 
 function addDays(dateStr: string, days: number): string {
   const d = new Date(dateStr + "T00:00:00");
@@ -28,14 +28,14 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function maxDueDate(): string {
-  return addDays(today(), MAX_LOAN_DAYS);
+function maxDueDate(maxLoanDays: number): string {
+  return addDays(today(), maxLoanDays);
 }
 
-function validateDueDate(dateStr: string): string | null {
+function validateDueDate(dateStr: string, maxLoanDays: number): string | null {
   if (!dateStr) return "Escolha a data de devolução.";
   if (dateStr < today()) return "A data de devolução não pode ser anterior a hoje.";
-  if (dateStr > maxDueDate()) return `A data de devolução não pode passar de ${MAX_LOAN_DAYS} dias.`;
+  if (dateStr > maxDueDate(maxLoanDays)) return `A data de devolução não pode passar de ${maxLoanDays} dias.`;
   return null;
 }
 
@@ -55,6 +55,7 @@ export default function Loans() {
   const [weekFilter, setWeekFilter] = useState<number | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [maxLoanDays, setMaxLoanDays] = useState(DEFAULT_MAX_LOAN_DAYS);
 
   // ── Data ─────────────────────────────────────────────────────────────────────
   const [loans, setLoans] = useState<LoanDetail[]>([]);
@@ -95,7 +96,13 @@ export default function Loans() {
   useEffect(() => { loadLoans(); }, [loadLoans]);
 
   useEffect(() => {
-    invoke<Book[]>("list_books", { search: nBookSearch || null, genre: null })
+    invoke<SystemSettings>("get_system_settings")
+      .then((settings) => setMaxLoanDays(settings.max_loan_days || DEFAULT_MAX_LOAN_DAYS))
+      .catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    invoke<Book[]>("list_books", { search: nBookSearch || null, genre: null, collectionType: null, includeDeleted: false })
       .then(setBooks).catch(console.error);
   }, [nBookSearch]);
 
@@ -110,7 +117,7 @@ export default function Loans() {
     setNError("");
     if (!nName.trim()) { setNError("Nome do aluno é obrigatório."); return; }
     if (nBookId === "") { setNError("Selecione um livro."); return; }
-    const dateError = validateDueDate(nDueDate);
+    const dateError = validateDueDate(nDueDate, maxLoanDays);
     if (dateError) { setNError(dateError); return; }
     setNLoading(true);
     try {
@@ -136,13 +143,13 @@ export default function Loans() {
   }
 
   function openRenew(l: LoanDetail) {
-    setRenewLoan(l); setRenewDate(addDays(l.due_date, 14)); setRenewError("");
+    setRenewLoan(l); setRenewDate(addDays(today(), Math.min(14, maxLoanDays))); setRenewError("");
   }
 
   async function handleRenew(e: React.FormEvent) {
     e.preventDefault();
     setRenewError("");
-    const dateError = validateDueDate(renewDate);
+    const dateError = validateDueDate(renewDate, maxLoanDays);
     if (dateError) { setRenewError(dateError); return; }
     setRenewLoading(true);
     try {
@@ -374,20 +381,20 @@ export default function Loans() {
           <div className="space-y-3">
             <div>
               <label className="label">Data de Devolução *</label>
-              <input className="input" type="date" min={today()} max={maxDueDate()} value={nDueDate} onChange={(e) => setNDueDate(e.target.value)} />
-              <p className="text-xs text-slate-500 mt-1">Limite máximo: {MAX_LOAN_DAYS} dias.</p>
+              <input className="input" type="date" min={today()} max={maxDueDate(maxLoanDays)} value={nDueDate} onChange={(e) => setNDueDate(e.target.value)} />
+              <p className="text-xs text-slate-500 mt-1">Limite máximo: {maxLoanDays} dias.</p>
             </div>
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => setNDueDate(addDays(today(), 7))}
+                onClick={() => setNDueDate(addDays(today(), Math.min(7, maxLoanDays)))}
                 className="btn-secondary text-xs"
               >
                 <CalendarDays className="w-3.5 h-3.5" /> 7 dias
               </button>
               <button
                 type="button"
-                onClick={() => setNDueDate(addDays(today(), 14))}
+                onClick={() => setNDueDate(addDays(today(), Math.min(14, maxLoanDays)))}
                 className="btn-secondary text-xs"
               >
                 <CalendarDays className="w-3.5 h-3.5" /> 14 dias
@@ -425,12 +432,12 @@ export default function Loans() {
             </div>
             <div>
               <label className="label">Nova Data de Devolução</label>
-              <input className="input" type="date" min={today()} max={maxDueDate()} value={renewDate} onChange={(e) => setRenewDate(e.target.value)} />
-              <p className="text-xs text-slate-500 mt-1">Limite máximo: {MAX_LOAN_DAYS} dias.</p>
+              <input className="input" type="date" min={today()} max={maxDueDate(maxLoanDays)} value={renewDate} onChange={(e) => setRenewDate(e.target.value)} />
+              <p className="text-xs text-slate-500 mt-1">Limite máximo: {maxLoanDays} dias.</p>
             </div>
             <div className="flex gap-2">
-              <button type="button" onClick={() => setRenewDate(addDays(renewLoan.due_date, 7))} className="btn-secondary text-xs">+7 dias</button>
-              <button type="button" onClick={() => setRenewDate(addDays(renewLoan.due_date, 14))} className="btn-secondary text-xs">+14 dias</button>
+              <button type="button" onClick={() => setRenewDate(addDays(today(), Math.min(7, maxLoanDays)))} className="btn-secondary text-xs">+7 dias</button>
+              <button type="button" onClick={() => setRenewDate(addDays(today(), Math.min(14, maxLoanDays)))} className="btn-secondary text-xs">+14 dias</button>
             </div>
             {renewError && <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-sm">{renewError}</div>}
             <div className="flex gap-3">

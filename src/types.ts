@@ -5,6 +5,10 @@ export interface User {
   created_at: string;
 }
 
+export interface SystemSettings {
+  max_loan_days: number;
+}
+
 export interface Student {
   id: number;
   name: string;
@@ -27,8 +31,10 @@ export interface Book {
   donor_name: string | null;
   donation_date: string | null;
   genre: string | null;
+  collection_type: string;
   is_donation: boolean;
   created_at: string;
+  deleted_at: string | null;
 }
 
 export interface BookPreview {
@@ -42,6 +48,7 @@ export interface BookPreview {
   donation_date: string | null;
   inferred_genre: string;
   genre: string;
+  collection_type: string;
 }
 
 export interface BookInput {
@@ -54,6 +61,7 @@ export interface BookInput {
   donor_name: string | null;
   donation_date: string | null;
   genre: string;
+  collection_type: string;
   is_donation: boolean;
 }
 

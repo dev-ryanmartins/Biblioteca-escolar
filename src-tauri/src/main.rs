@@ -25,6 +25,11 @@ struct User {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct SystemSettings {
+    max_loan_days: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Student {
     id: i64,
     name: String,
@@ -48,8 +53,10 @@ struct Book {
     donor_name: Option<String>,
     donation_date: Option<String>,
     genre: Option<String>,
+    collection_type: String,
     is_donation: bool,
     created_at: String,
+    deleted_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -64,6 +71,7 @@ struct BookPreview {
     donation_date: Option<String>,
     inferred_genre: String,
     genre: String,
+    collection_type: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -77,6 +85,7 @@ struct BookInput {
     donor_name: Option<String>,
     donation_date: Option<String>,
     genre: String,
+    collection_type: String,
     is_donation: bool,
 }
 
@@ -203,6 +212,8 @@ fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
             donor_name          TEXT,
             donation_date       TEXT,
             genre               TEXT,
+            collection_type     TEXT    NOT NULL DEFAULT 'book',
+            deleted_at          TEXT,
             is_donation         INTEGER NOT NULL DEFAULT 0,
             created_at          TEXT    NOT NULL
         );
@@ -235,12 +246,75 @@ fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
             created_at          TEXT    NOT NULL,
             FOREIGN KEY (loan_id) REFERENCES loans(id)
         );
+
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS genres (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT    NOT NULL,
+            collection_type TEXT    NOT NULL DEFAULT 'book',
+            created_at      TEXT    NOT NULL,
+            UNIQUE(name, collection_type)
+        );
         ",
     )?;
+    conn.execute("ALTER TABLE books ADD COLUMN collection_type TEXT NOT NULL DEFAULT 'book'", []).ok();
+    conn.execute("ALTER TABLE books ADD COLUMN deleted_at TEXT", []).ok();
+    conn.execute(
+        "INSERT OR IGNORE INTO system_settings (key,value,updated_at) VALUES ('max_loan_days',?1,?2)",
+        params![MAX_LOAN_DAYS.to_string(), now_str()],
+    )?;
+    seed_default_genres(conn)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO genres (name,collection_type,created_at)
+         SELECT DISTINCT genre, collection_type, ?1 FROM books
+         WHERE genre IS NOT NULL AND TRIM(genre) <> ''",
+        params![now_str()],
+    ).ok();
     Ok(())
 }
 
 // ──────────────────────────────────────────────── Helper functions ──────────
+
+fn seed_default_genres(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let now = now_str();
+    let defaults = [
+        ("book", "Aventura"),
+        ("book", "Fantasia"),
+        ("book", "Ficcao Cientifica"),
+        ("book", "Romance"),
+        ("book", "Misterio/Terror"),
+        ("book", "Historia/Biografia"),
+        ("book", "Humor"),
+        ("book", "Poesia"),
+        ("book", "Infantil/Fabula"),
+        ("book", "Educativo/Ciencias"),
+        ("book", "Classico"),
+        ("book", "Ilustracoes"),
+        ("book", "Geral"),
+        ("comic", "HQ"),
+        ("comic", "Manga"),
+        ("comic", "Graphic Novel"),
+        ("comic", "Tirinhas"),
+        ("comic", "Super-Herois"),
+        ("comic", "Infantil"),
+        ("comic", "Aventura"),
+        ("comic", "Humor"),
+        ("comic", "Ilustracoes"),
+        ("comic", "Geral"),
+    ];
+    for (collection_type, name) in defaults {
+        conn.execute(
+            "INSERT OR IGNORE INTO genres (name,collection_type,created_at) VALUES (?1,?2,?3)",
+            params![name, collection_type, now],
+        )?;
+    }
+    Ok(())
+}
 
 fn hash_password(password: &str) -> String {
     let mut hasher = Sha256::new();
@@ -281,6 +355,10 @@ fn infer_genre(title: &str, author: &str) -> String {
     best_genre.to_string()
 }
 
+fn normalize_collection_type(collection_type: &str) -> String {
+    if collection_type == "comic" { "comic".to_string() } else { "book".to_string() }
+}
+
 fn validate_grade_class(grade: i64, class: &str) -> bool {
     if grade < 1 || grade > 9 { return false; }
     let valid = if grade == 3 { vec!["A","B","C"] } else { vec!["A","B"] };
@@ -298,11 +376,23 @@ fn validate_school_year(ano_letivo: i64) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_due_date(due_date: &str) -> Result<(), String> {
+fn get_max_loan_days(conn: &Connection) -> i64 {
+    conn.query_row(
+        "SELECT value FROM system_settings WHERE key='max_loan_days'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|v| v.parse::<i64>().ok())
+    .filter(|v| (1..=30).contains(v))
+    .unwrap_or(MAX_LOAN_DAYS)
+}
+
+fn validate_due_date(due_date: &str, max_loan_days: i64) -> Result<(), String> {
     let due = NaiveDate::parse_from_str(due_date, "%Y-%m-%d")
         .map_err(|_| "Data de devolução inválida.".to_string())?;
     let today = Local::now().date_naive();
-    let max_due = today + Duration::days(MAX_LOAN_DAYS);
+    let max_due = today + Duration::days(max_loan_days);
 
     if due < today {
         return Err("A data de devolução não pode ser anterior a hoje.".to_string());
@@ -310,7 +400,7 @@ fn validate_due_date(due_date: &str) -> Result<(), String> {
     if due > max_due {
         return Err(format!(
             "A data de devolução não pode passar de {} dias.",
-            MAX_LOAN_DAYS
+            max_loan_days
         ));
     }
     Ok(())
@@ -468,9 +558,33 @@ fn delete_user(state: State<DbState>, id: i64) -> Result<(), String> {
 // ── Students ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
+fn get_system_settings(state: State<DbState>) -> Result<SystemSettings, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(SystemSettings { max_loan_days: get_max_loan_days(&conn) })
+}
+
+#[tauri::command]
+fn update_system_settings(state: State<DbState>, settings: SystemSettings) -> Result<SystemSettings, String> {
+    if settings.max_loan_days < 1 || settings.max_loan_days > 30 {
+        return Err("O prazo maximo precisa ficar entre 1 e 30 dias.".to_string());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO system_settings (key,value,updated_at) VALUES ('max_loan_days',?1,?2)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        params![settings.max_loan_days.to_string(), now_str()],
+    ).map_err(|e| e.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
 fn import_students_csv(state: State<DbState>, content: String) -> Result<ImportResult, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let mut rdr = csv::ReaderBuilder::new().flexible(true).trim(csv::Trim::All).from_reader(content.as_bytes());
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(content.as_bytes());
     let mut success = 0i64;
     let mut errors: Vec<String> = Vec::new();
     for (i, result) in rdr.records().enumerate() {
@@ -532,7 +646,11 @@ fn delete_student(state: State<DbState>, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 fn parse_books_csv(content: String) -> Result<Vec<BookPreview>, String> {
-    let mut rdr = csv::ReaderBuilder::new().flexible(true).trim(csv::Trim::All).from_reader(content.as_bytes());
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(content.as_bytes());
     let mut books: Vec<BookPreview> = Vec::new();
     for result in rdr.records() {
         let record = result.map_err(|e| e.to_string())?;
@@ -546,8 +664,12 @@ fn parse_books_csv(content: String) -> Result<Vec<BookPreview>, String> {
         let donation_date = record.get(7).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         if title.is_empty() { continue; }
         let inferred_genre = infer_genre(&title, &author);
-        let genre = inferred_genre.clone();
-        books.push(BookPreview { catalog_code, title, author, quantity, publisher, publication_year, donor_name, donation_date, inferred_genre, genre });
+        let genre = record
+            .get(8)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| inferred_genre.clone());
+        books.push(BookPreview { catalog_code, title, author, quantity, publisher, publication_year, donor_name, donation_date, inferred_genre, genre, collection_type: "book".to_string() });
     }
     Ok(books)
 }
@@ -558,11 +680,12 @@ fn confirm_books_import(state: State<DbState>, books: Vec<BookInput>) -> Result<
     let mut success = 0i64;
     let mut errors: Vec<String> = Vec::new();
     for book in books {
+        let collection_type = normalize_collection_type(&book.collection_type);
         match conn.execute(
-            "INSERT INTO books (catalog_code,title,author,quantity,available_quantity,publisher,publication_year,donor_name,donation_date,genre,is_donation,created_at)
-             VALUES (?1,?2,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO books (catalog_code,title,author,quantity,available_quantity,publisher,publication_year,donor_name,donation_date,genre,collection_type,is_donation,created_at)
+             VALUES (?1,?2,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![book.catalog_code, book.title, book.author, book.quantity, book.publisher, book.publication_year, book.donor_name, book.donation_date,
-                    if book.genre.is_empty() { None } else { Some(book.genre) }, book.is_donation as i64, now_str()],
+                    if book.genre.is_empty() { None } else { Some(book.genre) }, collection_type, book.is_donation as i64, now_str()],
         ) {
             Ok(_) => success += 1,
             Err(e) => errors.push(e.to_string()),
@@ -578,32 +701,40 @@ fn add_book(state: State<DbState>, book: BookInput) -> Result<Book, String> {
     }
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let now = now_str();
+    let collection_type = normalize_collection_type(&book.collection_type);
     conn.execute(
-        "INSERT INTO books (catalog_code,title,author,quantity,available_quantity,publisher,publication_year,donor_name,donation_date,genre,is_donation,created_at)
-         VALUES (?1,?2,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT INTO books (catalog_code,title,author,quantity,available_quantity,publisher,publication_year,donor_name,donation_date,genre,collection_type,is_donation,created_at)
+         VALUES (?1,?2,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![book.catalog_code, book.title.trim(), book.author.trim(), book.quantity, book.publisher, book.publication_year,
-                book.donor_name, book.donation_date, if book.genre.is_empty() { None } else { Some(book.genre.clone()) }, book.is_donation as i64, now],
+                book.donor_name, book.donation_date, if book.genre.is_empty() { None } else { Some(book.genre.clone()) }, collection_type, book.is_donation as i64, now],
     ).map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
     Ok(Book { id, catalog_code: book.catalog_code, title: book.title.trim().to_string(), author: book.author.trim().to_string(),
                quantity: book.quantity, available_quantity: book.quantity, publisher: book.publisher, publication_year: book.publication_year,
                donor_name: book.donor_name, donation_date: book.donation_date, genre: if book.genre.is_empty() { None } else { Some(book.genre) },
-               is_donation: book.is_donation, created_at: now })
+               collection_type: normalize_collection_type(&book.collection_type), is_donation: book.is_donation, created_at: now, deleted_at: None })
 }
 
 #[tauri::command]
-fn list_books(state: State<DbState>, search: Option<String>, genre: Option<String>) -> Result<Vec<Book>, String> {
+fn list_books(state: State<DbState>, search: Option<String>, genre: Option<String>, collection_type: Option<String>, include_deleted: Option<bool>) -> Result<Vec<Book>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let search_pat = format!("%{}%", search.as_deref().unwrap_or(""));
+    let collection_type = collection_type.map(|v| normalize_collection_type(&v));
+    let include_deleted = include_deleted.unwrap_or(false);
     let mut stmt = conn.prepare(
-        "SELECT id,catalog_code,title,author,quantity,available_quantity,publisher,publication_year,donor_name,donation_date,genre,is_donation,created_at
-         FROM books WHERE (?1 IS NULL OR title LIKE ?1 OR author LIKE ?1 OR catalog_code LIKE ?1) AND (?2 IS NULL OR genre=?2) ORDER BY title"
+        "SELECT id,catalog_code,title,author,quantity,available_quantity,publisher,publication_year,donor_name,donation_date,genre,collection_type,is_donation,created_at,deleted_at
+         FROM books
+         WHERE (?1 IS NULL OR title LIKE ?1 OR author LIKE ?1 OR catalog_code LIKE ?1)
+           AND (?2 IS NULL OR genre=?2)
+           AND (?3 IS NULL OR collection_type=?3)
+           AND (?4=1 OR deleted_at IS NULL)
+         ORDER BY title"
     ).map_err(|e| e.to_string())?;
     let books = stmt.query_map(
-        params![if search.is_none() { None } else { Some(search_pat) }, genre],
+        params![if search.is_none() { None } else { Some(search_pat) }, genre, collection_type, include_deleted as i64],
         |r| Ok(Book { id: r.get(0)?, catalog_code: r.get(1)?, title: r.get(2)?, author: r.get(3)?, quantity: r.get(4)?, available_quantity: r.get(5)?,
                        publisher: r.get(6)?, publication_year: r.get(7)?, donor_name: r.get(8)?, donation_date: r.get(9)?, genre: r.get(10)?,
-                       is_donation: r.get::<_, i64>(11)? != 0, created_at: r.get(12)? }),
+                       collection_type: r.get(11)?, is_donation: r.get::<_, i64>(12)? != 0, created_at: r.get(13)?, deleted_at: r.get(14)? }),
     ).map_err(|e| e.to_string())?.filter_map(|b| b.ok()).collect();
     Ok(books)
 }
@@ -611,10 +742,11 @@ fn list_books(state: State<DbState>, search: Option<String>, genre: Option<Strin
 #[tauri::command]
 fn update_book(state: State<DbState>, id: i64, book: BookInput) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let collection_type = normalize_collection_type(&book.collection_type);
     conn.execute(
-        "UPDATE books SET catalog_code=?1,title=?2,author=?3,quantity=?4,publisher=?5,publication_year=?6,donor_name=?7,donation_date=?8,genre=?9,is_donation=?10 WHERE id=?11",
+        "UPDATE books SET catalog_code=?1,title=?2,author=?3,quantity=?4,publisher=?5,publication_year=?6,donor_name=?7,donation_date=?8,genre=?9,collection_type=?10,is_donation=?11 WHERE id=?12",
         params![book.catalog_code, book.title, book.author, book.quantity, book.publisher, book.publication_year, book.donor_name, book.donation_date,
-                if book.genre.is_empty() { None } else { Some(book.genre) }, book.is_donation as i64, id],
+                if book.genre.is_empty() { None } else { Some(book.genre) }, collection_type, book.is_donation as i64, id],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -624,16 +756,113 @@ fn delete_book(state: State<DbState>, id: i64) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let active: i64 = conn.query_row("SELECT COUNT(*) FROM loans WHERE book_id=?1 AND status!='returned'", params![id], |r| r.get(0)).map_err(|e| e.to_string())?;
     if active > 0 { return Err("Livro possui empréstimos ativos e não pode ser excluído.".to_string()); }
-    conn.execute("DELETE FROM books WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
+    conn.execute("UPDATE books SET deleted_at=?1 WHERE id=?2", params![now_str(), id]).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn list_genres(state: State<DbState>) -> Result<Vec<GenreCount>, String> {
+fn restore_book(state: State<DbState>, id: i64) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT COALESCE(genre,'Geral'), COUNT(*) FROM books GROUP BY genre ORDER BY COUNT(*) DESC").map_err(|e| e.to_string())?;
-    let genres = stmt.query_map([], |r| Ok(GenreCount { genre: r.get(0)?, count: r.get(1)? })).map_err(|e| e.to_string())?.filter_map(|g| g.ok()).collect();
+    conn.execute("UPDATE books SET deleted_at=NULL WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn permanently_delete_book(state: State<DbState>, id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let used: i64 = conn.query_row("SELECT COUNT(*) FROM loans WHERE book_id=?1", params![id], |r| r.get(0)).unwrap_or(0);
+    if used > 0 { return Err("Livro possui historico de emprestimos e nao pode ser apagado definitivamente.".to_string()); }
+    conn.execute("DELETE FROM books WHERE id=?1 AND deleted_at IS NOT NULL", params![id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_books_by_genre(state: State<DbState>, genre: String, collection_type: Option<String>) -> Result<ImportResult, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let collection_type = collection_type.map(|v| normalize_collection_type(&v));
+    let now = now_str();
+    if let Some(ref collection_type) = collection_type {
+        conn.execute(
+            "INSERT OR IGNORE INTO genres (name,collection_type,created_at) VALUES ('Geral',?1,?2)",
+            params![collection_type, now],
+        ).map_err(|e| e.to_string())?;
+    }
+    let changed = conn.execute(
+        "UPDATE books SET deleted_at=?1
+         WHERE deleted_at IS NULL AND genre=?2 AND (?3 IS NULL OR collection_type=?3)
+           AND id NOT IN (SELECT book_id FROM loans WHERE status!='returned')",
+        params![now, genre, collection_type],
+    ).map_err(|e| e.to_string())?;
+
+    let blocked: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM books
+         WHERE deleted_at IS NULL AND genre=?1 AND (?2 IS NULL OR collection_type=?2)
+           AND id IN (SELECT book_id FROM loans WHERE status!='returned')",
+        params![genre, collection_type],
+        |r| r.get(0),
+    ).unwrap_or(0);
+
+    let mut errors = Vec::new();
+    if blocked > 0 {
+        conn.execute(
+            "UPDATE books SET genre='Geral'
+             WHERE deleted_at IS NULL AND genre=?1 AND (?2 IS NULL OR collection_type=?2)
+               AND id IN (SELECT book_id FROM loans WHERE status!='returned')",
+            params![genre, collection_type],
+        ).map_err(|e| e.to_string())?;
+        errors.push(format!(
+            "{} item(ns) possuem emprestimos ativos e foram movidos para Geral.",
+            blocked
+        ));
+    }
+    conn.execute(
+        "DELETE FROM genres WHERE name=?1 AND (?2 IS NULL OR collection_type=?2)",
+        params![genre, collection_type],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(ImportResult { success_count: changed as i64, error_count: errors.len() as i64, errors })
+}
+
+#[tauri::command]
+fn delete_all_books(state: State<DbState>, collection_type: Option<String>) -> Result<ImportResult, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let collection_type = collection_type.map(|v| normalize_collection_type(&v));
+    let changed = conn.execute(
+        "UPDATE books SET deleted_at=?1
+         WHERE deleted_at IS NULL AND (?2 IS NULL OR collection_type=?2)
+           AND id NOT IN (SELECT book_id FROM loans WHERE status!='returned')",
+        params![now_str(), collection_type],
+    ).map_err(|e| e.to_string())?;
+    Ok(ImportResult { success_count: changed as i64, error_count: 0, errors: vec![] })
+}
+
+#[tauri::command]
+fn list_genres(state: State<DbState>, collection_type: Option<String>) -> Result<Vec<GenreCount>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let collection_type = collection_type.map(|v| normalize_collection_type(&v));
+    let mut stmt = conn.prepare(
+        "SELECT g.name, COALESCE(COUNT(b.id),0)
+         FROM genres g
+         LEFT JOIN books b ON b.genre=g.name AND b.deleted_at IS NULL AND b.collection_type=g.collection_type
+         WHERE (?1 IS NULL OR g.collection_type=?1)
+         GROUP BY g.name
+         ORDER BY g.name"
+    ).map_err(|e| e.to_string())?;
+    let genres = stmt.query_map(params![collection_type], |r| Ok(GenreCount { genre: r.get(0)?, count: r.get(1)? })).map_err(|e| e.to_string())?.filter_map(|g| g.ok()).collect();
     Ok(genres)
+}
+
+#[tauri::command]
+fn add_genre(state: State<DbState>, name: String, collection_type: String) -> Result<GenreCount, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() { return Err("Informe o nome da categoria.".to_string()); }
+    let collection_type = normalize_collection_type(&collection_type);
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR IGNORE INTO genres (name,collection_type,created_at) VALUES (?1,?2,?3)",
+        params![name, collection_type, now_str()],
+    ).map_err(|e| e.to_string())?;
+    Ok(GenreCount { genre: name, count: 0 })
 }
 
 // ── Loans ─────────────────────────────────────────────────────────────────────
@@ -652,12 +881,12 @@ fn create_loan(
 ) -> Result<LoanDetail, String> {
     if student_name.trim().is_empty() { return Err("Nome do aluno é obrigatório.".to_string()); }
     validate_school_year(ano_letivo)?;
-    validate_due_date(&due_date)?;
     if !validate_grade_class(student_grade, &student_class) {
         return Err(format!("Turma '{}' inválida para o {}° Ano.", student_class, student_grade));
     }
 
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    validate_due_date(&due_date, get_max_loan_days(&conn))?;
 
     let available: i64 = conn.query_row("SELECT available_quantity FROM books WHERE id=?1", params![book_id], |r| r.get(0))
         .map_err(|_| "Livro não encontrado.".to_string())?;
@@ -713,8 +942,8 @@ fn return_book(state: State<DbState>, loan_id: i64) -> Result<(), String> {
 
 #[tauri::command]
 fn renew_loan(state: State<DbState>, loan_id: i64, new_due_date: String) -> Result<LoanDetail, String> {
-    validate_due_date(&new_due_date)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
+    validate_due_date(&new_due_date, get_max_loan_days(&conn))?;
     conn.execute("UPDATE loans SET due_date=?1, renewed=renewed+1, status='active' WHERE id=?2", params![new_due_date, loan_id]).map_err(|e| e.to_string())?;
     fetch_loan_detail(&conn, loan_id).map_err(|e| e.to_string())
 }
@@ -1002,7 +1231,7 @@ fn export_report_csv(
          ORDER BY l.loan_date DESC"
     ).map_err(|e| e.to_string())?;
 
-    let mut wtr = csv::WriterBuilder::new().from_writer(vec![]);
+    let mut wtr = csv::WriterBuilder::new().delimiter(b';').from_writer(vec![]);
     wtr.write_record(&[
         "ID", "Ano Letivo", "Série", "Turma", "Aluno", "Telefone", "E-mail",
         "Livro", "Data Empréstimo", "Data Devolução", "Status", "Multa Paga",
@@ -1065,6 +1294,8 @@ fn main() {
             login,
             list_users,
             delete_user,
+            get_system_settings,
+            update_system_settings,
             import_students_csv,
             list_students,
             delete_student,
@@ -1074,7 +1305,12 @@ fn main() {
             list_books,
             update_book,
             delete_book,
+            restore_book,
+            permanently_delete_book,
+            delete_books_by_genre,
+            delete_all_books,
             list_genres,
+            add_genre,
             create_loan,
             return_book,
             renew_loan,
